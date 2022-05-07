@@ -15,10 +15,20 @@ struct proc *initproc;
 int nextpid = 1;
 struct spinlock pid_lock;
 
+
 extern void forkret(void);
 static void freeproc(struct proc *p);
 
 extern char trampoline[]; // trampoline.S
+
+
+//Assignment2 T3
+int head_unused = -1;
+int head_sleeping = -1;
+int head_zombie = -1;
+int head_runnables = -1;
+int head_runnings = -1;
+
 
 // helps ensure that wakeups of wait()ing
 // parents are not lost. helps obey the
@@ -42,19 +52,143 @@ proc_mapstacks(pagetable_t kpgtbl) {
   }
 }
 
+extern uint64 cas(volatile void *addr, int expected, int newval);
+
+int
+indexOf(struct proc *p){
+  int output;
+  for(output = 0; output < NPROC; output++){
+    if(p == &proc[output]){
+      return output;
+    }
+  }
+  return -1;
+}
+
+void
+printUnsedList(){
+  struct proc *curr = &proc[head_unused];
+  while(curr->next != -1){
+    printf("%d\t", curr->pid);
+  }
+}
+
+//enum procstate {UNUSED, USED, SLEEPING, RUNNABLE, RUNNING, ZOMBIE };
+void printProcState(struct proc *p){
+  switch (p->state)
+  {
+  case UNUSED:
+    printf("%s\n", "UNSED");
+    break;
+  
+  case USED:
+    printf("%s\n", "USED");
+    break;
+  
+  case SLEEPING:
+    printf("%s\n", "SLEEPING");
+    break;
+
+  case RUNNABLE:
+    printf("%s\n", "RUNNABLE");
+    break;
+
+  case RUNNING:
+    printf("%s\n", "RUNNING");
+    break;
+
+  case ZOMBIE:
+    printf("%s\n", "ZOMBIE");
+    break;
+  default:
+    break;
+  }  
+} 
+void 
+insertToList(struct proc *p, int head){
+  acquire(&p->list_lock);
+  if(head == -1){ // the list is empty
+    p->next = -1;
+    p->prev = head;
+    head = indexOf(p);
+  }
+
+  else{
+    struct proc *curr = &proc[head];
+    acquire(&curr->list_lock);
+    while(curr->next != -1){
+      curr = &proc[curr->next];
+    }
+    curr->next = indexOf(p);
+    p->next = -1;
+    p->prev = indexOf(curr);
+    release(&curr->list_lock);
+  }
+  release(&p->list_lock);
+}
+
+
+void
+removeFromList(struct proc *p, int head){
+  if(head == -1){
+    return;
+  }
+  else{
+    acquire(&p->list_lock);
+    struct proc *curr = &proc[head];
+    int index = indexOf(p);
+    if(index == -1){
+      return;
+    }
+    acquire(&curr->list_lock);
+    while(curr->next != indexOf(p)){
+      curr = &proc[curr->next];
+    }
+    
+    struct proc *next = &proc[p->next];
+    acquire(&next->list_lock);
+    if(indexOf(next) != -1){
+      curr->next = p->next;
+      next->prev = indexOf(curr);
+    }
+    release(&next->list_lock);
+
+    p->prev = -1;
+    release(&curr->list_lock);
+    release(&p->list_lock);
+  }
+}
+
+//returns an index of the first runnable and changes the head accordingly.
+int
+get_firstRunnable(struct cpu *c){
+  struct proc *first_runnable = &proc[c->runnables_head_list]; // check if -1
+  acquire(&first_runnable->list_lock);
+  c->runnables_head_list = first_runnable->next;
+  int output = indexOf(first_runnable);
+  release(&first_runnable->list_lock);
+  return output;
+}
+
 // initialize the proc table at boot time.
 void
 procinit(void)
 {
   struct proc *p;
-  
+
   initlock(&pid_lock, "nextpid");
   initlock(&wait_lock, "wait_lock");
   for(p = proc; p < &proc[NPROC]; p++) {
       initlock(&p->lock, "proc");
       p->kstack = KSTACK((int) (p - proc));
   }
+  printProcState(p);
+  insertToList(p, head_unused);
 }
+
+
+
+
 
 // Must be called with interrupts disabled,
 // to prevent race with process being moved
@@ -75,6 +209,8 @@ mycpu(void) {
   return c;
 }
 
+
+
 // Return the current struct proc *, or zero if none.
 struct proc*
 myproc(void) {
@@ -87,14 +223,27 @@ myproc(void) {
 
 int
 allocpid() {
+
   int pid;
-  
-  acquire(&pid_lock);
-  pid = nextpid;
-  nextpid = nextpid + 1;
-  release(&pid_lock);
+
+  do{
+    pid = nextpid;
+  }while(cas(&nextpid, pid, pid +1));
 
   return pid;
+}
+
+//added at Assignment 3.1.5
+int
+set_cpu(int cpu_num){ //needs to be corrected
+  struct proc *p = myproc();
+  p->cpuid = cpu_num;
+  return cpu_num;
+}
+
+int
+get_cpu(){
+  return cpuid();
 }
 
 // Look in the process table for an UNUSED proc.
@@ -118,7 +267,13 @@ allocproc(void)
 
 found:
   p->pid = allocpid();
+  p->cpuid = 
   p->state = USED;
+
+  //check if it should be here!
+  struct cpu *c = &cpus[p->cpuid];
+  p->state = RUNNABLE;
+  insertToList(p,c->runnables_head_list);
 
   // Allocate a trapframe page.
   if((p->trapframe = (struct trapframe *)kalloc()) == 0){
@@ -164,6 +319,8 @@ freeproc(struct proc *p)
   p->killed = 0;
   p->xstate = 0;
   p->state = UNUSED;
+  removeFromList(p,head_zombie); 
+  insertToList(p,head_unused);
 }
 
 // Create a user page table for a given process,
@@ -280,6 +437,7 @@ fork(void)
   if((np = allocproc()) == 0){
     return -1;
   }
+  printf("global pid: %d\n", nextpid);
 
   // Copy user memory from parent to child.
   if(uvmcopy(p->pagetable, np->pagetable, p->sz) < 0){
@@ -313,6 +471,9 @@ fork(void)
 
   acquire(&np->lock);
   np->state = RUNNABLE;
+  struct cpu *c = &cpus[np->cpuid];
+  removeFromList(np,head_unused);
+  insertToList(np,c->runnables_head_list);
   release(&np->lock);
 
   return pid;
@@ -370,6 +531,8 @@ exit(int status)
 
   p->xstate = status;
   p->state = ZOMBIE;
+  removeFromList(p,head_runnings);
+  insertToList(p,head_zombie);
 
   release(&wait_lock);
 
@@ -453,6 +616,8 @@ scheduler(void)
         // before jumping back to us.
         p->state = RUNNING;
         c->proc = p;
+        removeFromList(p,c->runnables_head_list);
+        insertToList(p,c->runnings_head_list);
         swtch(&c->context, &p->context);
 
         // Process is done running for now.
@@ -498,6 +663,9 @@ yield(void)
   struct proc *p = myproc();
   acquire(&p->lock);
   p->state = RUNNABLE;
+  struct cpu *c = &cpus[p->cpuid];
+  removeFromList(p,c->runnings_head_list);
+  insertToList(p,c->runnables_head_list);
   sched();
   release(&p->lock);
 }
@@ -543,7 +711,9 @@ sleep(void *chan, struct spinlock *lk)
   // Go to sleep.
   p->chan = chan;
   p->state = SLEEPING;
-
+  struct cpu *c = &cpus[p->cpuid];
+  removeFromList(p,c->runnings_head_list);
+  insertToList(p,head_sleeping);
   sched();
 
   // Tidy up.
@@ -566,6 +736,9 @@ wakeup(void *chan)
       acquire(&p->lock);
       if(p->state == SLEEPING && p->chan == chan) {
         p->state = RUNNABLE;
+        removeFromList(p, head_sleeping);
+        struct cpu *c = &cpus[p->cpuid];
+        insertToList(p,c->runnables_head_list);
       }
       release(&p->lock);
     }
@@ -584,6 +757,10 @@ kill(int pid)
     acquire(&p->lock);
     if(p->pid == pid){
       p->killed = 1;
+      struct cpu *c = &cpus[p->cpuid];
+      insertToList(p,head_zombie); // admit to the global ZOMBIE list
+      removeFromList(p,c->runnables_head_list); // remove from its cpu's ready list.
+
       if(p->state == SLEEPING){
         // Wake process from sleep().
         p->state = RUNNABLE;

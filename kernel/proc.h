@@ -24,6 +24,8 @@ struct cpu {
   struct context context;     // swtch() here to enter scheduler().
   int noff;                   // Depth of push_off() nesting.
   int intena;                 // Were interrupts enabled before push_off()?
+  int runnables_head_list;
+  int runnings_head_list;
 };
 
 extern struct cpu cpus[NCPU];
@@ -80,7 +82,7 @@ struct trapframe {
   /* 280 */ uint64 t6;
 };
 
-enum procstate { UNUSED, USED, SLEEPING, RUNNABLE, RUNNING, ZOMBIE };
+enum procstate {UNUSED, USED, SLEEPING, RUNNABLE, RUNNING, ZOMBIE };
 
 // Per-process state
 struct proc {
@@ -92,6 +94,11 @@ struct proc {
   int killed;                  // If non-zero, have been killed
   int xstate;                  // Exit status to be returned to parent's wait
   int pid;                     // Process ID
+  int next;
+  int prev;
+  struct spinlock list_lock;       //for list handeling
+  int cpuid;
+
 
   // wait_lock must be held when using this:
   struct proc *parent;         // Parent process
